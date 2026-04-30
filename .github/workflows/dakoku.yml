@@ -1,0 +1,31 @@
+name: TimePro Clock-in/out Automation
+
+on:
+  # スマホのショートカット等から外部API呼び出しで実行可能にする
+  workflow_dispatch:
+
+jobs:
+  dakoku:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          playwright install chromium
+
+      - name: Run Auto Dakoku Script
+        env:
+          # GitHub Secrets に登録したIDとパスワードを環境変数として渡す
+          TIMEPRO_USER_ID: ${{ secrets.TIMEPRO_USER_ID }}
+          TIMEPRO_PASSWORD: ${{ secrets.TIMEPRO_PASSWORD }}
+        run: python auto_dakoku_cloud.py
