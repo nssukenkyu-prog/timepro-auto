@@ -98,9 +98,8 @@ def run():
                     try:
                         target_btn = frame.locator(selector).first
                         if target_btn.count() > 0:
-                            # 土曜日テスト用：実際のクリック処理はコメントアウトして止めています
-                            # target_btn.click(force=True, timeout=5000)
-                            print(f"✅ 【テスト成功】{target_text} のボタンを発見しました！（実際のクリックはスキップしました）")
+                            target_btn.click(force=True, timeout=5000)
+                            print(f"✅ 【成功】{target_text} の打刻をプログラム経由で実行しました！")
                             click_success = True
                             break
                     except:
@@ -134,9 +133,8 @@ def run():
                             try:
                                 target_btn = frame.locator(selector).first
                                 if target_btn.count() > 0:
-                                    # 土曜日テスト用：実際のクリック処理はコメントアウトして止めています
-                                    # target_btn.click(force=True, timeout=5000)
-                                    print(f"✅ 【テスト成功】{target_text} のボタンを発見しました！（実際のクリックはスキップしました）")
+                                    target_btn.click(force=True, timeout=5000)
+                                    print(f"✅ 【成功】{target_text} の打刻を実行しました！")
                                     click_success = True
                                     break
                             except:
@@ -149,12 +147,11 @@ def run():
         if not click_success:
             print(f"⚠️ プログラムからの直接打刻に失敗しました。座標クリックを実行します。")
             try:
-                # 土曜日テスト用：実際のクリック処理はコメントアウトして止めています
-                # if target_text == "出勤":
-                #     page.mouse.click(90, 480)
-                # else:
-                #     page.mouse.click(180, 480)
-                print(f"✅ 【テスト成功】{target_text} の座標クリックをシミュレートしました！（実際のクリックはスキップしました）")
+                if target_text == "出勤":
+                    page.mouse.click(90, 480)
+                else:
+                    page.mouse.click(180, 480)
+                print(f"✅ 【成功】{target_text} の座標をクリックしました！")
                 click_success = True
             except Exception as e:
                 print("座標クリック中にエラーが発生しました:", e)
