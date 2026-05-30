@@ -77,8 +77,10 @@ def run():
         page.wait_for_load_state("networkidle")
         time.sleep(8)
 
-        now = datetime.datetime.now()
-        # GitHub Actionsのサーバー上でも timezone_id="Asia/Tokyo" に設定しているため、日本時間で判定されます
+        t_delta = datetime.timedelta(hours=9)
+        JST = datetime.timezone(t_delta, 'JST')
+        now = datetime.datetime.now(JST)
+        # 修正: 明示的に日本時間（JST）を取得して判定します
         if now.hour < 12:
             target_text = "出勤"
             selectors = ["input[value='出勤']", "input[value*='出勤']", "input#btn1"]
@@ -96,8 +98,9 @@ def run():
                     try:
                         target_btn = frame.locator(selector).first
                         if target_btn.count() > 0:
-                            target_btn.click(force=True, timeout=5000)
-                            print(f"✅ 【成功】{target_text} の打刻をプログラム経由で実行しました！")
+                            # 土曜日テスト用：実際のクリック処理はコメントアウトして止めています
+                            # target_btn.click(force=True, timeout=5000)
+                            print(f"✅ 【テスト成功】{target_text} のボタンを発見しました！（実際のクリックはスキップしました）")
                             click_success = True
                             break
                     except:
@@ -131,8 +134,9 @@ def run():
                             try:
                                 target_btn = frame.locator(selector).first
                                 if target_btn.count() > 0:
-                                    target_btn.click(force=True, timeout=5000)
-                                    print(f"✅ 【成功】{target_text} の打刻を実行しました！")
+                                    # 土曜日テスト用：実際のクリック処理はコメントアウトして止めています
+                                    # target_btn.click(force=True, timeout=5000)
+                                    print(f"✅ 【テスト成功】{target_text} のボタンを発見しました！（実際のクリックはスキップしました）")
                                     click_success = True
                                     break
                             except:
@@ -145,11 +149,12 @@ def run():
         if not click_success:
             print(f"⚠️ プログラムからの直接打刻に失敗しました。座標クリックを実行します。")
             try:
-                if target_text == "出勤":
-                    page.mouse.click(90, 480)
-                else:
-                    page.mouse.click(180, 480)
-                print(f"✅ 【成功】{target_text} の座標をクリックしました！")
+                # 土曜日テスト用：実際のクリック処理はコメントアウトして止めています
+                # if target_text == "出勤":
+                #     page.mouse.click(90, 480)
+                # else:
+                #     page.mouse.click(180, 480)
+                print(f"✅ 【テスト成功】{target_text} の座標クリックをシミュレートしました！（実際のクリックはスキップしました）")
                 click_success = True
             except Exception as e:
                 print("座標クリック中にエラーが発生しました:", e)
