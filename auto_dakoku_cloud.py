@@ -83,10 +83,16 @@ def run():
         # 修正: 明示的に日本時間（JST）を取得して判定します
         if now.hour < 12:
             target_text = "出勤"
-            selectors = ["input[value='出勤']", "input[value*='出勤']", "input#btn1"]
+            selectors = [
+                "input[value='出勤']", "input[value*='出勤']", "input#btn1",
+                "img[src*='in']", "img[src*='IN']", "img[alt*='出勤']", "button:has-text('出勤')"
+            ]
         else:
             target_text = "退勤"
-            selectors = ["input[value='退勤']", "input[value*='退勤']", "input#btn2"]
+            selectors = [
+                "input[value='退勤']", "input[value*='退勤']", "input#btn2",
+                "img[src*='out']", "img[src*='OUT']", "img[alt*='退勤']", "button:has-text('退勤')"
+            ]
 
         print(f"[{now.strftime('%H:%M')}] {target_text} ボタンを探しています...")
         
@@ -116,12 +122,13 @@ def run():
                 for frame in [p_frame.main_frame] + p_frame.frames:
                     try:
                         menu_btn = frame.locator("text='クロッキング', a[title*='クロッキング'], img[alt*='クロッキング']").first
-                        if menu_btn.is_visible(timeout=500):
+                        if menu_btn.is_visible(timeout=1000):
+                            print("「クロッキング」メニューをクリックします...")
                             menu_btn.click()
                             time.sleep(4)
                             menu_clicked = True
                             break
-                    except:
+                    except Exception:
                         continue
                 if menu_clicked:
                     break
@@ -148,9 +155,13 @@ def run():
             print(f"⚠️ プログラムからの直接打刻に失敗しました。座標クリックを実行します。")
             try:
                 if target_text == "出勤":
-                    page.mouse.click(90, 480)
+                    for y in [580, 600, 620]:
+                        page.mouse.click(60, y)
+                        time.sleep(0.5)
                 else:
-                    page.mouse.click(180, 480)
+                    for y in [580, 600, 620]:
+                        page.mouse.click(150, y)
+                        time.sleep(0.5)
                 print(f"✅ 【成功】{target_text} の座標をクリックしました！")
                 click_success = True
             except Exception as e:
