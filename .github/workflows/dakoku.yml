@@ -29,3 +29,10 @@ jobs:
           TIMEPRO_USER_ID: ${{ secrets.TIMEPRO_USER_ID }}
           TIMEPRO_PASSWORD: ${{ secrets.TIMEPRO_PASSWORD }}
         run: python auto_dakoku_cloud.py
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: '*.png'

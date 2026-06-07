@@ -153,6 +153,8 @@ def run():
 
         if not click_success:
             print(f"⚠️ プログラムからの直接打刻に失敗しました。座標クリックを実行します。")
+            page.screenshot(path="debug.png", full_page=True)
+            print("スクリーンショットを debug.png に保存しました。")
             try:
                 if target_text == "出勤":
                     for y in [580, 600, 620]:
