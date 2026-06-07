@@ -40,6 +40,13 @@ def run():
         time.sleep(3)
 
         print("ログイン画面を探しています...")
+        
+        # 追加: ダイアログ（打刻確認ポップアップなど）が出た場合は自動でOKを押す
+        def handle_dialog(dialog):
+            print(f"ダイアログを検知・自動承認しました: {dialog.message}")
+            dialog.accept()
+        page.on("dialog", handle_dialog)
+        
         login_success = False
 
         for frame in [page.main_frame] + page.frames:
@@ -152,22 +159,68 @@ def run():
                         break
 
         if not click_success:
-            print(f"⚠️ プログラムからの直接打刻に失敗しました。座標クリックを実行します。")
-            page.screenshot(path="debug.png", full_page=True)
-            print("スクリーンショットを debug.png に保存しました。")
+            print(f"⚠️ プログラムからの直接打刻に失敗しました。JavaScriptによる強制クリックを実行します。")
+            page.screenshot(path="debug_before_js.png", full_page=True)
+            
+            js_script = """
+            (targetText) => {
+                let clicked = false;
+                function traverse(win) {
+                    try {
+                        let els = win.document.querySelectorAll('input, button, a, div, span, img');
+                        for (let el of els) {
+                            let textContent = (el.value || '') + (el.innerText || '') + (el.alt || '');
+                            if (textContent.includes(targetText)) {
+                                let rect = el.getBoundingClientRect();
+                                // メニュー項目などを除外するため、適度なサイズの要素のみクリック
+                                if (rect.width > 20 && rect.width < 300 && rect.height > 10 && rect.height < 100) {
+                                    el.click();
+                                    clicked = true;
+                                    return;
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                    try {
+                        for (let i=0; i<win.frames.length; i++) {
+                            traverse(win.frames[i]);
+                            if(clicked) return;
+                        }
+                    } catch(e) {}
+                }
+                traverse(window);
+                return clicked;
+            }
+            """
+            
             try:
-                if target_text == "出勤":
-                    for y in [580, 600, 620]:
-                        page.mouse.click(60, y)
-                        time.sleep(0.5)
+                js_clicked = page.evaluate(js_script, target_text)
+                if js_clicked:
+                    print(f"✅ 【成功】JavaScriptで {target_text} のボタンを強制クリックしました！")
+                    click_success = True
                 else:
-                    for y in [580, 600, 620]:
-                        page.mouse.click(150, y)
-                        time.sleep(0.5)
-                print(f"✅ 【成功】{target_text} の座標をクリックしました！")
-                click_success = True
+                    print(f"❌ JavaScriptでも {target_text} のボタンを見つけられませんでした。")
             except Exception as e:
-                print("座標クリック中にエラーが発生しました:", e)
+                print("JavaScript強制クリック中にエラーが発生しました:", e)
+
+            # 万が一JSでもダメだった場合の究極のバックアップ（座標）
+            if not click_success:
+                print("⚠️ 最終バックアップの座標クリックを実行します。")
+                try:
+                    if target_text == "出勤":
+                        for y in [580, 600, 620]:
+                            page.mouse.click(60, y)
+                            time.sleep(0.5)
+                    else:
+                        for y in [580, 600, 620]:
+                            page.mouse.click(150, y)
+                            time.sleep(0.5)
+                    print(f"✅ 【成功】{target_text} のバックアップ座標をクリックしました！")
+                    click_success = True
+                except Exception as e:
+                    print("座標クリック中にエラーが発生しました:", e)
+                    
+            page.screenshot(path="debug_after_js.png", full_page=True)
 
         print("処理が完了しました。")
         time.sleep(3)
