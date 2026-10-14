@@ -1,6 +1,7 @@
 """Offline tests: no university traffic and no browser login or clock-in."""
 from contextlib import redirect_stdout
 import io
+import errno
 import json
 import socket
 import types
@@ -35,7 +36,7 @@ class DiagnosticSafetyTests(unittest.TestCase):
             diagnostic.measure("tcp_443", lambda: (_ for _ in ()).throw(
                 TimeoutError("https://example/?token=PRIVATE; Cookie: SECRET")), 1)
         item = json.loads(output.getvalue())
-        self.assertEqual(item["failure"], "timeout")
+        self.assertEqual(item["failure"], "socket_timeout")
         self.assertNotIn("PRIVATE", output.getvalue())
         self.assertNotIn("SECRET", output.getvalue())
 
@@ -85,7 +86,7 @@ class DiagnosticSafetyTests(unittest.TestCase):
 
     def test_tcp_timeout_has_no_retry_or_http_request(self):
         result, raw, connection, records = self.run_http_probe(tcp_error=TimeoutError())
-        self.assertEqual(result, "timeout")
+        self.assertEqual(result, "socket_timeout")
         self.assertEqual(raw.connect.call_count, 1)
         connection.request.assert_not_called()
         self.assertEqual(records[-1]["stage"], "tcp_443")
@@ -105,17 +106,102 @@ class DiagnosticSafetyTests(unittest.TestCase):
         self.assertEqual(result, "access_denied")
         self.assertEqual(records[-1]["stage"], "https_get_body")
         with patch.dict("os.environ", {}, clear=True), \
-                patch.object(diagnostic, "probe_https", side_effect=diagnostic.StopDiagnostic(result)), \
+                patch.object(diagnostic, "probe_transport", side_effect=diagnostic.StopDiagnostic(result)), \
                 patch.object(diagnostic, "probe_browser") as browser:
             self.assertEqual(diagnostic.main(), 1)
             browser.assert_not_called()
 
     def test_proxy_configuration_stops_without_changing_it(self):
         with patch.dict("os.environ", {"HTTPS_PROXY": "http://PRIVATE"}, clear=True), \
-                patch.object(diagnostic, "probe_https") as probe, redirect_stdout(io.StringIO()) as output:
+                patch.object(diagnostic, "probe_transport") as probe, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(diagnostic.main(), 1)
             probe.assert_not_called()
             self.assertNotIn("PRIVATE", output.getvalue())
+
+
+class ComparisonTests(unittest.TestCase):
+    def transport(self, addresses, error=None):
+        sock = MagicMock()
+        sock.getpeername.return_value = addresses[0][4] if addresses else None
+        if error:
+            sock.connect.side_effect = error
+        output = io.StringIO()
+        with patch.object(diagnostic.socket, "getaddrinfo", return_value=addresses) as resolver, \
+                patch.object(diagnostic.socket, "socket", return_value=sock) as constructor, \
+                redirect_stdout(output):
+            try:
+                diagnostic.probe_transport()
+            except diagnostic.StopDiagnostic:
+                pass
+        resolver.assert_called_once_with(diagnostic.HOST, 443, type=socket.SOCK_STREAM)
+        return sock, constructor, [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_order_family_duplicates_selection_and_peer_are_preserved(self):
+        rows = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "PRIVATE_CANONNAME", ("2001:db8::1", 443, 0, 0)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "PRIVATE_CANONNAME", ("192.0.2.1", 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "PRIVATE_CANONNAME", ("192.0.2.1", 443))]
+        sock, constructor, records = self.transport(rows)
+        constructor.assert_called_once_with(socket.AF_INET6, socket.SOCK_STREAM, 6)
+        sock.connect.assert_called_once_with(rows[0][4])
+        sock.settimeout.assert_called_once_with(20)
+        sock.close.assert_called_once()
+        answers = records[0]["answers"]
+        self.assertEqual([a["order"] for a in answers], [1, 2, 3])
+        self.assertEqual([a["family"] for a in answers], ["AF_INET6", "AF_INET", "AF_INET"])
+        self.assertEqual(records[-1]["selected"], answers[0])
+        self.assertEqual(records[-1]["peer"], {"family": "AF_INET6", "ip": "2001:db8::1", "port": 443})
+        self.assertNotIn("PRIVATE", json.dumps(records))
+
+    def test_first_failure_never_tries_the_next_address_and_errno_is_numeric(self):
+        rows = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.2", 443))]
+        sock, constructor, records = self.transport(rows, OSError(errno.ENETUNREACH, "PRIVATE_URL?token=SECRET"))
+        self.assertEqual(constructor.call_count, 1)
+        sock.connect.assert_called_once_with(rows[0][4])
+        self.assertEqual(records[-1]["errno"], errno.ENETUNREACH)
+        self.assertEqual(records[-1]["failure"], "network_unreachable")
+        self.assertEqual(records[-1]["timeout_seconds"], 20)
+        self.assertNotIn("PRIVATE", json.dumps(records))
+        self.assertNotIn("SECRET", json.dumps(records))
+
+    def test_stage_deadline_and_socket_timeout_are_distinct(self):
+        rows = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.1", 443))]
+        for error, expected in [(diagnostic.StageDeadlineExceeded(), "stage_deadline"),
+                                (TimeoutError(), "socket_timeout"),
+                                (TimeoutError(errno.ETIMEDOUT, "PRIVATE"), "socket_timeout")]:
+            with self.subTest(expected=expected):
+                sock, _, records = self.transport(rows, error)
+                self.assertEqual(sock.connect.call_count, 1)
+                self.assertEqual(records[-1]["failure"], expected)
+                self.assertEqual(records[-1]["errno"], error.errno)
+
+    def test_elapsed_deadline_is_enforced_without_network(self):
+        import time
+        start = time.monotonic()
+        with self.assertRaises(diagnostic.StageDeadlineExceeded):
+            with diagnostic.deadline(0.02):
+                time.sleep(1)
+        self.assertLess(time.monotonic() - start, 0.5)
+
+    def test_empty_answers_never_create_socket(self):
+        _, constructor, records = self.transport([])
+        constructor.assert_not_called()
+        self.assertEqual(records[-1]["failure"], "dns_no_address")
+
+    def test_main_stops_after_transport_and_reports_source_hash(self):
+        output = io.StringIO()
+        with patch.dict("os.environ", {}, clear=True), \
+                patch.object(diagnostic, "probe_transport") as transport, \
+                patch.object(diagnostic, "probe_https") as https, \
+                patch.object(diagnostic, "probe_browser") as browser, redirect_stdout(output):
+            self.assertEqual(diagnostic.main(), 0)
+        transport.assert_called_once()
+        https.assert_not_called()
+        browser.assert_not_called()
+        first = json.loads(output.getvalue().splitlines()[0])
+        self.assertRegex(first["script_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(first["mode"], "dns_tcp_only")
+        self.assertEqual(first["timeout_seconds"], 20)
 
 
 class BrowserSafetyTests(unittest.IsolatedAsyncioTestCase):

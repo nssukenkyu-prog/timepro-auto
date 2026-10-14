@@ -1,15 +1,22 @@
-"""One bounded, anonymous connection diagnosis. Never imports the clock-in script.
+"""One DNS/TCP comparison; the default entrypoint stops after one TCP attempt.
 
-Only fixed stage names, outcomes, durations, HTTP codes and failure categories
-are emitted. Responses are inspected in memory; no files/artifacts are written.
+Public target DNS answers, their order, the selected target, a successful peer,
+timing and sanitized errors are emitted. No client IP/interface/SSID is read.
+Earlier HTTPS/browser helpers are retained but are not run by this comparison.
+Never imports the clock-in script or writes response files/artifacts.
 """
 
 import asyncio
 from contextlib import contextmanager, suppress
+from datetime import datetime, timezone
+import errno
+import hashlib
 import html
 import http.client
+import ipaddress
 import json
 import os
+from pathlib import Path
 import re
 import signal
 import socket
@@ -21,6 +28,10 @@ from urllib.parse import urlsplit
 HOST = "employ.nittai.ac.jp"
 PATH = "/TimePro-VG/page/Ovg00010t.aspx"
 URL = "https://" + HOST + PATH
+DNS_TIMEOUT_SECONDS = 10
+TCP_TIMEOUT_SECONDS = 20
+PUBLIC_METADATA = {"timestamp_utc", "script_sha256", "mode", "answers", "selected",
+                   "peer", "errno", "timeout_seconds", "proxy_environment_present"}
 BODY_LIMIT = 512 * 1024
 DENIED_STATUSES = {401, 403, 407, 429, 451}
 RESOURCE_TYPES = {"document", "stylesheet", "image", "media", "font", "script",
@@ -35,7 +46,11 @@ class StopDiagnostic(Exception):
         self.kind, self.status = kind, status
 
 
-def record(stage, outcome, started=None, status=None, failure=None):
+class StageDeadlineExceeded(TimeoutError):
+    """Our elapsed-time limit, distinct from a socket/OS timeout."""
+
+
+def record(stage, outcome, started=None, status=None, failure=None, metadata=None):
     item = {"stage": stage, "result": outcome}
     if started is not None:
         item["elapsed_ms"] = round((time.monotonic() - started) * 1000)
@@ -43,13 +58,19 @@ def record(stage, outcome, started=None, status=None, failure=None):
         item["response_code"] = int(status)
     if failure:
         item["failure"] = failure
+    if metadata:
+        item.update({key: value for key, value in metadata.items() if key in PUBLIC_METADATA})
     print(json.dumps(item, sort_keys=True), flush=True)
 
 
 def failure_kind(error):
     if isinstance(error, StopDiagnostic):
         return error.kind
-    if isinstance(error, (TimeoutError, socket.timeout)) or type(error).__name__ == "TimeoutError":
+    if isinstance(error, StageDeadlineExceeded):
+        return "stage_deadline"
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return "socket_timeout"
+    if type(error).__name__ == "TimeoutError":
         return "timeout"
     if isinstance(error, socket.gaierror):
         return "dns_resolution_error"
@@ -62,14 +83,16 @@ def failure_kind(error):
     if isinstance(error, ConnectionResetError):
         return "connection_reset"
     if isinstance(error, OSError):
-        return "os_network_error"
+        return {errno.ENETUNREACH: "network_unreachable", errno.EHOSTUNREACH: "host_unreachable",
+                errno.EACCES: "permission_denied", errno.EPERM: "permission_denied"}.get(
+                    error.errno, "os_network_error")
     return "internal_error"
 
 
 @contextmanager
 def deadline(seconds):
     def expired(_signum, _frame):
-        raise TimeoutError()
+        raise StageDeadlineExceeded()
     previous = signal.signal(signal.SIGALRM, expired)
     signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
@@ -79,16 +102,62 @@ def deadline(seconds):
         signal.signal(signal.SIGALRM, previous)
 
 
-def measure(stage, operation, seconds, response=False):
+def measure(stage, operation, seconds, response=False, metadata=None, describe=None):
     start = time.monotonic()
+    metadata = dict(metadata or {})
+    metadata["timeout_seconds"] = seconds
     try:
         with deadline(seconds):
             result = operation()
-        record(stage, "ok", start, result.status if response else None)
+        if describe:
+            metadata.update(describe(result))
+        record(stage, "ok", start, result.status if response else None, metadata=metadata)
         return result
     except Exception as error:
-        record(stage, "failed", start, getattr(error, "status", None), failure_kind(error))
+        number = getattr(error, "errno", None)
+        metadata["errno"] = number if type(number) is int else None
+        record(stage, "failed", start, getattr(error, "status", None), failure_kind(error), metadata)
         raise StopDiagnostic(failure_kind(error)) from None
+
+
+def describe_address(family, address):
+    # Keep only validated destination address data; never log canonname, scope
+    # IDs, exception strings, local interfaces or getaddrinfo's other fields.
+    if family not in (socket.AF_INET, socket.AF_INET6):
+        raise StopDiagnostic("unsupported_address_family")
+    return {"family": "AF_INET" if family == socket.AF_INET else "AF_INET6",
+            "ip": str(ipaddress.ip_address(address[0])), "port": int(address[1])}
+
+
+def describe_answers(addresses):
+    if not addresses:
+        raise StopDiagnostic("dns_no_address")
+    return {"answers": [dict(order=index + 1, **describe_address(row[0], row[4]))
+                        for index, row in enumerate(addresses)]}
+
+
+def probe_transport():
+    # Resolve once; preserve order and duplicates. No family preference, IP
+    # override, fallback candidate, retry, proxy, TLS, HTTP or browser request.
+    addresses = measure("dns", lambda: socket.getaddrinfo(
+        HOST, 443, type=socket.SOCK_STREAM), DNS_TIMEOUT_SECONDS, describe=describe_answers)
+    family, kind, protocol, _, address = addresses[0]
+    selected = dict(order=1, **describe_address(family, address))
+    record("tcp_selection", "ok", metadata={"selected": selected})
+    sock = None
+    try:
+        def connect_once():
+            nonlocal sock
+            sock = socket.socket(family, kind, protocol)
+            sock.settimeout(TCP_TIMEOUT_SECONDS)
+            sock.connect(address)
+            return describe_address(family, sock.getpeername())
+
+        measure("tcp_443", connect_once, TCP_TIMEOUT_SECONDS,
+                metadata={"selected": selected}, describe=lambda peer: {"peer": peer})
+    finally:
+        if sock is not None:
+            sock.close()
 
 
 def has_denial(body):
@@ -289,17 +358,18 @@ async def probe_browser():
 
 
 def main():
-    if any(os.environ.get(key) for key in
-           ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")):
+    record("diagnostic_start", "ok", metadata={
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "mode": "dns_tcp_only", "timeout_seconds": TCP_TIMEOUT_SECONDS})
+    proxy_present = any(os.environ.get(key) for key in
+                        ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"))
+    if proxy_present:
         record("preflight", "failed", failure="proxy_environment_present")
         return 1
+    record("preflight", "ok", metadata={"proxy_environment_present": False})
     try:
-        probe_https()
-        async def bounded_browser():
-            return await asyncio.wait_for(probe_browser(), timeout=75)
-
-        if not asyncio.run(bounded_browser()):
-            return 1
+        probe_transport()
         record("diagnostic", "ok")
         return 0
     except StopDiagnostic:
